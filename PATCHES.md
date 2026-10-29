@@ -1526,7 +1526,6 @@ each step. That run used the parser *before* patches 43-50.
 - **Forwarded messages are not embedded items.** They are attached `.eml` files
   (`ATTACH_BY_VALUE`), not embedded MAPI messages (`ATTACH_EMBEDDED_MSG`). Outlook opens them,
   but they do not behave like an attached Outlook item.
-- **Python versions.** Tests were run locally on Python 3.14. CI is configured for 3.9-3.13.
 - **The search scaffolding of patch 40 is minimal.** It is enough for Outlook to open the file
   and for Microsoft 365 to import it. Outlook rebuilds its own search state.
 - **ANSI (pre-2003) PST files** are not written and not supported.

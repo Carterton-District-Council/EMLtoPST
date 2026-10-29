@@ -51,7 +51,7 @@ See the end of [PATCHES.md](PATCHES.md) for the full list of what is not yet ver
 
 ## Install
 
-Requires Python 3.9 or later.
+Requires Python 3.10 or later.
 
 ```bash
 git clone https://github.com/Carterton-District-Council/EMLtoPST.git
