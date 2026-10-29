@@ -8,6 +8,7 @@ See [MS-PST] 2.3.2.
 
 import struct
 from .heap import HeapOnNode, HN_CLIENT_BTH
+from ..errors import PSTWriteError
 
 # BTHHEADER: 8 bytes
 BTH_HEADER_SIZE = 8
@@ -34,8 +35,10 @@ def build_bth_data(entries, key_size=2, data_size=6):
         # Build leaf record data
         leaf_data = b''
         for key, value in entries:
-            assert len(key) == key_size, f"Key size mismatch: {len(key)} != {key_size}"
-            assert len(value) == data_size, f"Data size mismatch: {len(value)} != {data_size}"
+            if not (len(key) == key_size):
+                raise PSTWriteError(f"Key size mismatch: {len(key)} != {key_size}")
+            if not (len(value) == data_size):
+                raise PSTWriteError(f"Data size mismatch: {len(value)} != {data_size}")
             leaf_data += key + value
 
         leaf_hid = hn.allocate(leaf_data)

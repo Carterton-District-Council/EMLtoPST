@@ -6,6 +6,7 @@ Unicode PST: wVer >= 23, 8-byte BIDs and IBs.
 
 import struct
 from ..crc import compute_crc
+from ..errors import PSTWriteError
 
 # Header constants
 MAGIC = b'\x21\x42\x44\x4E'  # "!BDN"
@@ -53,12 +54,23 @@ def pack_root(file_eof, ib_amap_last, cb_amap_free, cb_pmap_free,
     data += pack_bref(*bref_nbt)
     data += pack_bref(*bref_bbt)
     data += struct.pack('<BBH', f_amap_valid, 0, 0)
-    assert len(data) == ROOT_SIZE
+    if not (len(data) == ROOT_SIZE):
+        raise PSTWriteError('header.py: invariant failed: len(data) == ROOT_SIZE')
     return data
 
 
+"""Minimum value for every rgnid entry.
+
+Real Outlook's Inbox Repair Tool reports its own computed high-water marks
+when they disagree with the header, and it computes 0x400 for every NID type
+that has no higher index in use - so 0x400 is the floor, not zero. See
+PATCHES.md.
+"""
+NID_HIGH_WATER_FLOOR = 0x400
+
+
 def build_header(root_data, bid_next_p, bid_next_b, unique=1,
-                 crypt_method=CRYPT_NONE):
+                 crypt_method=CRYPT_NONE, rgnid=None):
     """Build a complete 564-byte Unicode PST header.
 
     Args:
@@ -87,11 +99,19 @@ def build_header(root_data, bid_next_p, bid_next_b, unique=1,
     struct.pack_into('<Q', buf, 0x20, bid_next_p)
     struct.pack_into('<I', buf, 0x28, unique)
 
-    # rgnid[32] at 0x2C - NID counters per type (128 bytes)
-    # Initialize to reasonable starting values
-    # Index 0 (NID_TYPE_NONE) = 0
-    # We set all to 0 initially; the PST file builder manages NID allocation
-    # rgnid is 32 x 4 bytes = 128 bytes at 0x2C..0xAB
+    # rgnid[32] at 0x2C - per-NID-type high-water marks (32 x 4 bytes).
+    # Each entry is the highest nidIndex allocated for that type, floored at
+    # NID_HIGH_WATER_FLOOR. Leaving these zero produced 32 "Header NID
+    # high-water mark has incorrect value" complaints per run; the rule was
+    # read straight off scanpst's own "calculated=" values (0x400 for every
+    # unused type, 0x105E for NID_TYPE_NORMAL_MESSAGE matching this build's
+    # 4,190 highest message index, 0x3701 for NID_TYPE_LTP matching the
+    # PR_ATTACH_DATA_BIN subnode). See PATCHES.md.
+    marks = list(rgnid or [])
+    marks += [0] * (32 - len(marks))
+    for i in range(32):
+        struct.pack_into('<I', buf, 0x2C + i * 4,
+                         max(NID_HIGH_WATER_FLOOR, marks[i]))
 
     # qwUnused at 0xAC = 0 (8 bytes)
 

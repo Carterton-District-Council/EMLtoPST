@@ -11,6 +11,7 @@ See [MS-PST] 2.3.1.
 
 import struct
 from ..ndb.block import MAX_BLOCK_DATA
+from ..errors import PSTWriteError
 
 # HN heap signature (always 0xEC for any HN block)
 HN_SIG = 0xEC
@@ -25,6 +26,21 @@ HNHDR_SIZE = 12
 
 # HNPAGEHDR: 2 bytes (pages after page 0)
 HNPAGEHDR_SIZE = 2
+
+# HNBITMAPHDR: ibHnpm(2) + rgbFillLevel(64) = 66 bytes. Per [MS-PST] 2.3.1.4 a
+# bitmap header's fill-level map covers the next 128 data blocks, where the
+# HNHDR's own 4-byte map covers only the first 8 - so bitmap headers appear at
+# block 8, then every 128 blocks after that. Confirmed against a real
+# Microsoft-written multi-block HN (117 blocks): blocks 1, 7 and 9 start their
+# first allocation at offset 2, and block 8 starts at 66.
+HNBITMAPHDR_SIZE = 66
+_FIRST_BITMAP_PAGE = 8
+_BITMAP_PAGE_INTERVAL = 128
+
+
+def _is_bitmap_page(page_index):
+    return (page_index >= _FIRST_BITMAP_PAGE
+            and (page_index - _FIRST_BITMAP_PAGE) % _BITMAP_PAGE_INTERVAL == 0)
 
 # Maximum individual allocation on an HN page per [MS-PST] 2.3.1
 MAX_HN_ALLOC = 3580
@@ -67,8 +83,12 @@ class HeapOnNode:
         self._current_page = 0
 
     def _page_header_size(self, page_index):
-        """Header size for a given page (12 for page 0, 2 for subsequent)."""
-        return HNHDR_SIZE if page_index == 0 else HNPAGEHDR_SIZE
+        """Header size for a page: HNHDR, HNBITMAPHDR or HNPAGEHDR."""
+        if page_index == 0:
+            return HNHDR_SIZE
+        if _is_bitmap_page(page_index):
+            return HNBITMAPHDR_SIZE
+        return HNPAGEHDR_SIZE
 
     def _can_fit(self, page_index, allocs, new_data_len):
         """Check if adding new_data to a page with existing allocs fits."""
@@ -81,7 +101,21 @@ class HeapOnNode:
         return total <= MAX_BLOCK_DATA
 
     def allocate(self, data: bytes) -> int:
-        """Allocate data on the heap and return its HID."""
+        """Allocate data on the heap and return its HID.
+
+        Allocations are stored at their exact length. Only ibHnpm - the offset
+        of the HNPAGEMAP - has to land on a 2-byte boundary, and that is
+        handled once per page in _build_page0/_build_page_n rather than by
+        rounding up every allocation.
+
+        An earlier version padded each allocation to an even length, which
+        fixed the "bad ibHnpm" errors but corrupted anything whose stored
+        length is meaningful: a TC's Row Matrix must be exactly
+        rows x rowsize, and a single 55-byte row was being stored as 56. A
+        real Outlook-written PST stores that same allocation at 55 bytes with
+        an even ibHnpm, confirming per-allocation padding is not what the
+        format wants. See PATCHES.md.
+        """
         page = self._current_page
         allocs = self._pages[page]
 
@@ -97,6 +131,28 @@ class HeapOnNode:
         allocs.append(data)
         return hid
 
+    def allocate_placeholder(self, size: int) -> int:
+        """Reserve an allocation of `size` bytes now, to be filled in later.
+
+        Lets a caller claim heap space for structures whose size is known up
+        front but whose contents depend on allocations made afterwards (a
+        TC's TCINFO, Row Index BTH and Row Matrix all reference HIDs of the
+        per-row strings). Reserving them first keeps them on page 0, which is
+        where real PSTs put them - see build_tc_node() and PATCHES.md.
+        """
+        return self.allocate(b'\x00' * size)
+
+    def patch(self, hid: int, data: bytes) -> None:
+        """Replace the contents of a previously reserved allocation."""
+        page = (hid >> 16) & 0xFFFF
+        index = (hid >> 5) & 0x7FF
+        slot = self._pages[page][index - 1]
+        if len(data) < len(slot):
+            data = data + b'\x00' * (len(slot) - len(data))
+        if not (len(data) == len(slot)):
+            raise PSTWriteError(f"patch size mismatch: reserved {len(slot)}, got {len(data)}")
+        self._pages[page][index - 1] = data
+
     def set_user_root(self, hid):
         """Set the user root HID (typically the BTH header)."""
         self.user_root_hid = hid
@@ -104,15 +160,31 @@ class HeapOnNode:
     def build(self) -> list:
         """Build the raw data blocks for all HN pages.
 
+        Every page except the last is padded out to exactly MAX_BLOCK_DATA.
+        In a multi-block HN a reader locates page N purely by block index, and
+        a real Microsoft-written multi-block HN has *every* block except the
+        last at exactly 8176 bytes (verified against a 117-block Contents
+        Table in a PST that Outlook accepts). Emitting short intermediate
+        pages made everything past page 0 unreachable, and Outlook silently
+        discarded the affected messages rather than reporting an error -
+        see PATCHES.md.
+
         Returns:
             List of bytes objects, one per page/block (without block trailers).
         """
         result = []
+        last = len(self._pages) - 1
         for page_idx, allocations in enumerate(self._pages):
             if page_idx == 0:
-                result.append(self._build_page0(allocations))
+                page = self._build_page0(allocations)
             else:
-                result.append(self._build_page_n(allocations))
+                page = self._build_page_n(allocations, page_idx)
+            if page_idx != last:
+                if not (len(page) <= MAX_BLOCK_DATA):
+                    raise PSTWriteError(f"HN page {page_idx} is {len(page)} bytes, over the "
+                    f"{MAX_BLOCK_DATA}-byte block limit")
+                page = page + b'\x00' * (MAX_BLOCK_DATA - len(page))
+            result.append(page)
         return result
 
     def _build_page0(self, allocations):
@@ -128,7 +200,10 @@ class HeapOnNode:
             current += len(alloc)
         offsets.append(current)  # Sentinel
 
-        data_area_size = current
+        # Pad the data area, not the allocations, so ibHnpm stays even.
+        alloc_end = data_start + current
+        pad = alloc_end % 2
+        data_area_size = current + pad
         ib_hnpm = data_start + data_area_size
 
         # HNHDR (12 bytes)
@@ -139,19 +214,26 @@ class HeapOnNode:
                             self.user_root_hid,
                             0)  # dwFill
 
-        data_area = b''.join(allocations)
+        data_area = b''.join(allocations) + b'\x00' * pad
 
-        # HNPAGEMAP
+        # HNPAGEMAP (cFree counts the alignment byte, if any)
+        # cFree is the count of *freed allocations*, not spare bytes - nothing
+        # here is ever freed, so it is always 0. Setting it to the alignment
+        # pad byte instead produced "HN free alloc count doesn't match
+        # (computed=0, expected=1)" and crashed scanpst outright. A real
+        # Outlook-written page confirms the shape: sentinel 293, ibHnpm 294,
+        # a 1-byte gap, and cFree 0. See PATCHES.md.
         pagemap = struct.pack('<HH', num_alloc, 0)
         for off in offsets:
             pagemap += struct.pack('<H', off + data_start)
 
         return hnhdr + data_area + pagemap
 
-    def _build_page_n(self, allocations):
-        """Build page N>0 with HNPAGEHDR (2 bytes)."""
+    def _build_page_n(self, allocations, page_index):
+        """Build page N>0 with an HNPAGEHDR or, every 128 blocks from block 8,
+        an HNBITMAPHDR."""
         num_alloc = len(allocations)
-        data_start = HNPAGEHDR_SIZE
+        data_start = self._page_header_size(page_index)
 
         offsets = []
         current = 0
@@ -160,14 +242,27 @@ class HeapOnNode:
             current += len(alloc)
         offsets.append(current)
 
-        data_area_size = current
+        # Pad the data area, not the allocations, so ibHnpm stays even.
+        alloc_end = data_start + current
+        pad = alloc_end % 2
+        data_area_size = current + pad
         ib_hnpm = data_start + data_area_size
 
-        # HNPAGEHDR (2 bytes): just ibHnpm
+        # HNPAGEHDR is just ibHnpm; HNBITMAPHDR adds a 64-byte fill-level map
+        # (left zeroed - 0 means "at least 3584 bytes free / block does not
+        # exist" per [MS-PST] 2.3.1.2, which nothing reads back here).
         header = struct.pack('<H', ib_hnpm)
+        if data_start == HNBITMAPHDR_SIZE:
+            header += b'\x00' * (HNBITMAPHDR_SIZE - HNPAGEHDR_SIZE)
 
-        data_area = b''.join(allocations)
+        data_area = b''.join(allocations) + b'\x00' * pad
 
+        # cFree is the count of *freed allocations*, not spare bytes - nothing
+        # here is ever freed, so it is always 0. Setting it to the alignment
+        # pad byte instead produced "HN free alloc count doesn't match
+        # (computed=0, expected=1)" and crashed scanpst outright. A real
+        # Outlook-written page confirms the shape: sentinel 293, ibHnpm 294,
+        # a 1-byte gap, and cFree 0. See PATCHES.md.
         pagemap = struct.pack('<HH', num_alloc, 0)
         for off in offsets:
             pagemap += struct.pack('<H', off + data_start)

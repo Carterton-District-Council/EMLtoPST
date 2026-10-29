@@ -9,6 +9,7 @@ See [MS-PST] 2.2.2.8.
 
 import struct
 from ..crc import compute_crc
+from ..errors import PSTWriteError
 
 BLOCK_ALIGN = 64
 MAX_BLOCK_DATA = 8176  # 8192 - 16 (trailer size)
@@ -16,16 +17,17 @@ BLOCK_TRAILER_SIZE = 16
 
 
 def block_signature(ib: int, bid: int) -> int:
-    """Compute block signature per [MS-PST] 5.5.
+    """Compute block/page signature per [MS-PST] 5.5.
 
-    Implements the ComputeSig algorithm from the specification:
-    ib ^= bid; ib >>= 16; bid >>= 16; ib ^= bid; return ib & 0xFFFF
+    ComputeSig algorithm: dwValue = (DWORD)ib XOR (DWORD)bid;
+    wSig = HIWORD(dwValue) XOR LOWORD(dwValue). Confirmed against a real
+    Outlook "Data File Corruption" error naming the exact expected wSig for a
+    known (ib, bid) pair - the previous formula here produced a different,
+    wrong value that Outlook's reader (unlike readpst, which doesn't
+    validate wSig) rejected outright. See PATCHES.md.
     """
-    ib ^= bid
-    ib >>= 16
-    bid >>= 16
-    ib ^= bid
-    return ib & 0xFFFF
+    value = (ib ^ bid) & 0xFFFFFFFF
+    return ((value >> 16) ^ (value & 0xFFFF)) & 0xFFFF
 
 
 def pack_block(data: bytes, bid: int, ib: int) -> bytes:
@@ -39,15 +41,18 @@ def pack_block(data: bytes, bid: int, ib: int) -> bytes:
     Returns:
         64-byte aligned block bytes with trailer.
     """
-    assert len(data) <= MAX_BLOCK_DATA, f"Block data too large: {len(data)}"
+    if not (len(data) <= MAX_BLOCK_DATA):
+        raise PSTWriteError(f"Block data too large: {len(data)}")
 
     cb = len(data)
-    # Per [MS-PST] 2.2.2.8.1: internal blocks (XBLOCK/SLBLOCK, BID bit 1 set)
-    # MUST have wSig=0. Only leaf data blocks get a computed signature.
-    if bid & 0x02:
-        w_sig = 0
-    else:
-        w_sig = block_signature(ib, bid)
+    # Every block - leaf or internal (XBLOCK/SLBLOCK) - gets a real computed
+    # signature; there is no "internal blocks always get wSig=0" exception.
+    # A prior version of this code assumed there was (misattributed to
+    # [MS-PST] 2.2.2.8.1) and real Outlook's Inbox Repair Tool flagged every
+    # internal block as "Invalid block ... Sig mismatch" as a result -
+    # ComputeSig(ib, bid) reproduced its named expected value exactly for
+    # several internal blocks. See PATCHES.md.
+    w_sig = block_signature(ib, bid)
     crc = compute_crc(data)
 
     # BLOCKTRAILER: cb(2) + wSig(2) + dwCRC(4) + bid(8) = 16 bytes

@@ -53,6 +53,34 @@ def pad_to(data: bytes, boundary: int, fill: int = 0x00) -> bytes:
     return data + bytes([fill]) * (padded_len - len(data))
 
 
+# The well-known "one-off" EntryID provider UID per [MS-OXCDATA] 2.2.5.1,
+# used for recipients that aren't resolved against a directory (e.g. plain
+# SMTP addresses parsed from an EML's To/Cc headers).
+_ONE_OFF_PROVIDER_UID = bytes.fromhex("A41F2B81A3BE19109D6E00DD010F5402")
+_ONE_OFF_UNICODE_FLAG = 0x8000
+
+
+def make_one_off_entry_id(display_name: str, address_type: str, email_address: str) -> bytes:
+    """Build a one-off EntryID (PR_ENTRYID) for an unresolved recipient.
+
+    Per [MS-OXCDATA] 2.2.5.1: Flags(4) + ProviderUID(16) + Version(2) +
+    Flags(2) + null-terminated DisplayName/AddressType/EmailAddress (UTF-16LE
+    here, matching the Unicode flag bit set below).
+    """
+    header = (
+        struct.pack('<I', 0)
+        + _ONE_OFF_PROVIDER_UID
+        + struct.pack('<H', 0x0000)
+        + struct.pack('<H', _ONE_OFF_UNICODE_FLAG)
+    )
+    return (
+        header
+        + encode_unicode(display_name)
+        + encode_unicode(address_type)
+        + encode_unicode(email_address)
+    )
+
+
 def make_entry_id(nid: int) -> bytes:
     """Create a minimal PST internal entry ID from a NID.
 

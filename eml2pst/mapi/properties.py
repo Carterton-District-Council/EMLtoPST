@@ -83,6 +83,10 @@ PR_IMPORTANCE = prop_tag(0x0017, PT_LONG)
 PR_PRIORITY = prop_tag(0x0026, PT_LONG)
 PR_SENSITIVITY = prop_tag(0x0036, PT_LONG)
 PR_HASATTACH = prop_tag(0x0E1B, PT_BOOLEAN)
+PR_DISPLAY_TO = prop_tag(0x0E04, PT_UNICODE)
+PR_DISPLAY_CC = prop_tag(0x0E03, PT_UNICODE)
+PR_DISPLAY_BCC = prop_tag(0x0E02, PT_UNICODE)
+PR_INTERNET_MESSAGE_ID = prop_tag(0x1035, PT_UNICODE)
 PR_MESSAGE_DELIVERY_TIME = prop_tag(0x0E06, PT_SYSTIME)
 PR_CLIENT_SUBMIT_TIME = prop_tag(0x0039, PT_SYSTIME)
 PR_CREATION_TIME = prop_tag(0x3007, PT_SYSTIME)
@@ -104,6 +108,16 @@ PR_EMAIL_ADDRESS = prop_tag(0x3003, PT_UNICODE)
 PR_ADDRTYPE = prop_tag(0x3002, PT_UNICODE)
 PR_RECIPIENT_TYPE = prop_tag(0x0C15, PT_LONG)
 PR_ROWID = prop_tag(0x3000, PT_LONG)
+# Additional columns real Outlook's Inbox Repair Tool flagged as required on the
+# Recipients Table beyond the minimal set above - see PATCHES.md.
+PR_RESPONSIBILITY = prop_tag(0x0E0F, PT_BOOLEAN)
+PR_OBJECT_TYPE = prop_tag(0x0FFE, PT_LONG)
+PR_SEARCH_KEY = prop_tag(0x300B, PT_BINARY)
+PR_DISPLAY_TYPE = prop_tag(0x3900, PT_LONG)
+PR_SEND_RICH_INFO = prop_tag(0x3A40, PT_BOOLEAN)
+PR_ADDRESS_BOOK_DISPLAY_NAME = prop_tag(0x39FF, PT_UNICODE)
+MAPI_MAILUSER = 6  # PR_OBJECT_TYPE value for an individual recipient
+DT_MAILUSER = 0  # PR_DISPLAY_TYPE value for a regular mail user
 
 # Recipient types
 MAPI_TO = 1
@@ -119,6 +133,11 @@ PR_ATTACH_SIZE = prop_tag(0x0E20, PT_LONG)
 PR_ATTACH_DATA_BIN = prop_tag(0x3701, PT_BINARY)
 PR_ATTACH_MIME_TAG = prop_tag(0x370E, PT_UNICODE)
 PR_RENDERING_POSITION = prop_tag(0x370B, PT_LONG)
+
+# --- Associated Contents (FAI) Table columns ---
+# Real Outlook's Inbox Repair Tool requires these three on a folder's
+# Associated Contents table even when it has no rows - see PATCHES.md.
+PR_VIEW_DESCRIPTOR_FLAGS = prop_tag(0x7003, PT_LONG)
 
 # Attachment methods
 ATTACH_BY_VALUE = 1

@@ -12,13 +12,17 @@ from ..ltp.pc import build_pc_node
 from ..mapi.properties import (
     NID_MESSAGE_STORE, NID_ROOT_FOLDER,
     PR_RECORD_KEY, PR_DISPLAY_NAME,
-    PR_IPM_SUBTREE_ENTRYID,
+    PR_IPM_SUBTREE_ENTRYID, PR_IPM_WASTEBASKET_ENTRYID, PR_FINDER_ENTRYID,
     PR_STORE_SUPPORT_MASK, PR_VALID_FOLDER_MASK,
     PR_PST_PASSWORD,
     DEFAULT_STORE_SUPPORT_MASK,
-    FOLDER_IPM_SUBTREE_VALID,
+    FOLDER_IPM_SUBTREE_VALID, FOLDER_IPM_WASTEBASKET_VALID, FOLDER_FINDER_VALID,
     PT_LONG, PT_BINARY, prop_tag,
 )
+
+
+# PidTagReplVersionHistory (PT_BINARY)
+PR_REPL_VERSION_HISTORY = 0x0E340102
 
 
 def make_entry_id(record_key, nid):
@@ -32,7 +36,13 @@ def make_entry_id(record_key, nid):
     return struct.pack('<I', 0) + record_key[:16] + struct.pack('<I', nid)
 
 
-def build_message_store(display_name="Personal Folders"):
+IPM_SUBTREE_NAME = "Outlook Data File"
+WASTEBASKET_NAME = "Deleted Items"
+FINDER_NAME = "Search Root"
+
+
+def build_message_store(display_name="Personal Folders", ipm_subtree_nid=None,
+                        wastebasket_nid=None, finder_nid=None):
     """Build the Message Store Property Context data block.
 
     Returns:
@@ -44,11 +54,41 @@ def build_message_store(display_name="Personal Folders"):
     properties = [
         (PR_RECORD_KEY, record_key),
         (PR_DISPLAY_NAME, display_name),
-        (PR_IPM_SUBTREE_ENTRYID, make_entry_id(record_key, NID_ROOT_FOLDER)),
+        # Points at the IPM subtree folder - a CHILD of the root - which is
+        # what a real Outlook-authored PST does. Falls back to the root only
+        # for callers that don't build a subtree.
+        (PR_IPM_SUBTREE_ENTRYID,
+         make_entry_id(record_key, ipm_subtree_nid or NID_ROOT_FOLDER)),
         (PR_STORE_SUPPORT_MASK, DEFAULT_STORE_SUPPORT_MASK),
-        (PR_VALID_FOLDER_MASK, FOLDER_IPM_SUBTREE_VALID),
         (PR_PST_PASSWORD, 0),
+        # PidTagReplVersionHistory - the only remaining property difference
+        # between this store and one real Outlook opens. Structure copied from
+        # that reference: a 4-byte count, a 16-byte GUID, and a 4-byte version.
+        # The GUID there is distinct from the store's record key, so this uses
+        # its own random one rather than reusing the record key.
+        # No error message named this property; it is written because leaving
+        # a known deviation from a working reference in place is what cost the
+        # patch-39 round. See PATCHES.md patch 40.
+        (PR_REPL_VERSION_HISTORY,
+         struct.pack('<I', 1) + os.urandom(16) + struct.pack('<I', 1)),
     ]
+
+    # A store must also point at its wastebasket and finder folders, and say
+    # so in PidTagValidFolderMask. We previously declared only the IPM subtree
+    # as valid and omitted both EntryIDs. Microsoft's own import service
+    # enumerated zero items from such a store while importing 2,218 messages
+    # from an Outlook-authored PST through the identical mapping - see
+    # PATCHES.md patch 42.
+    valid_mask = FOLDER_IPM_SUBTREE_VALID
+    if wastebasket_nid:
+        properties.append(
+            (PR_IPM_WASTEBASKET_ENTRYID, make_entry_id(record_key, wastebasket_nid)))
+        valid_mask |= FOLDER_IPM_WASTEBASKET_VALID
+    if finder_nid:
+        properties.append(
+            (PR_FINDER_ENTRYID, make_entry_id(record_key, finder_nid)))
+        valid_mask |= FOLDER_FINDER_VALID
+    properties.append((PR_VALID_FOLDER_MASK, valid_mask))
 
     return build_pc_node(properties), record_key
 
